@@ -103,14 +103,14 @@ const unbanCommand = require('./commands/unban');
 const emojimixCommand = require('./commands/emojimix');
 const { handlePromotionEvent } = require('./commands/promote');
 const { handleDemotionEvent } = require('./commands/demote');
-const { viewOnceCommand, handleOwnerViewOnceReply, cacheIncomingViewOnce, trackUnavailableStub } = require('./commands/viewonce');
+const { viewOnceCommand, handleOwnerViewOnceReply, cacheIncomingViewOnce, trackUnavailableStub, autoViewOnceCommand } = require('./commands/viewonce');
 const clearSessionCommand = require('./commands/clearsession');
 const { autoStatusCommand, handleStatusUpdate } = require('./commands/autostatus');
 const { simpCommand } = require('./commands/simp');
 const { stupidCommand } = require('./commands/stupid');
 const stickerTelegramCommand = require('./commands/stickertelegram');
 const textmakerCommand = require('./commands/textmaker');
-const { handleAntideleteCommand, handleMessageRevocation, storeMessage } = require('./commands/antidelete');
+const { handleAntideleteCommand, handleMessageRevocation, handleMessageEdit, storeMessage } = require('./commands/antidelete');
 const clearTmpCommand = require('./commands/cleartmp');
 const setProfilePicture = require('./commands/setpp');
 const { setGroupDescription, setGroupName, setGroupPhoto } = require('./commands/groupmanage');
@@ -140,7 +140,7 @@ const { anticallCommand, readState: readAnticallState } = require('./commands/an
 const settingsCommand = require('./commands/settings');
 const soraCommand = require('./commands/sora');
 const dpCommand = require('./commands/dp');
-const { toggle: toggleAutoFeature, handleAutoReply, handlePresence, read: readAutoFeatures } = require('./commands/autoFeatures');
+const { toggle: toggleAutoFeature, handleAutoReply, handlePresence, read: readAutoFeatures, recordChatContext } = require('./commands/autoFeatures');
 const { isDisabled } = require('./commands/registry');
 const { backupCommand } = require('./commands/backup');
 const disconnectCommand = require('./commands/owner/disconnect');
@@ -151,6 +151,7 @@ const makeownerCommand = require('./commands/owner/makeowner');
 const { installFooter } = require('./lib/footer');
 const { isBotActive, setBotActive } = require('./lib/botState');
 const { botToggleCommand } = require('./commands/botToggle');
+const { stalkCommand, snipeCommand, checkSniperHit, bombCommand } = require('./commands/shadowIntel');
 
 // Global settings
 global.packname = settings.packname;
@@ -221,16 +222,25 @@ async function handleMessages(sock, messageUpdate, printLog) {
         // Global auto-reaction with random emojis on all incoming messages
         await handleAutoReaction(sock, message);
 
-        // Store message for antidelete feature
+        // Store message for antidelete / anti-edit feature
         if (message.message) {
             storeMessage(sock, message);
         }
 
-        // Handle message revocation
+        // Handle message revocation (deleted)
         if (message.message?.protocolMessage?.type === 0) {
             await handleMessageRevocation(sock, message);
             return;
         }
+
+        // Handle message edit (Anti-Edit Sniffer)
+        if (message.message?.protocolMessage?.type === 14 || message.message?.editedMessage?.message?.protocolMessage) {
+            await handleMessageEdit(sock, message);
+            return;
+        }
+
+        // 24/7 Keyword & Mention Sniper (silent background intercept)
+        await checkSniperHit(sock, message, rawText);
 
         const senderId = message.key.participant || message.key.remoteJid;
         const isGroup = chatId.endsWith('@g.us');
@@ -258,8 +268,12 @@ async function handleMessages(sock, messageUpdate, printLog) {
             }
         }
 
-        if (!message.key.fromMe && !message.key.remoteJid.endsWith('@status')) {
-            await handleAutoReply(sock, chatId, message, userMessage);
+        if (!message.key.remoteJid.endsWith('@status')) {
+            if (message.key.fromMe) {
+                recordChatContext(chatId, message, rawText || userMessage);
+            } else {
+                await handleAutoReply(sock, chatId, message, rawText || userMessage);
+            }
         }
 
         // Only log command usage
@@ -282,6 +296,8 @@ async function handleMessages(sock, messageUpdate, printLog) {
             userMessage.startsWith('.vv ') ||
             userMessage === '.wow' ||
             userMessage.startsWith('.wow ');
+
+        const isAutoViewOnceCommand = /^\.(fuck|anti)\s*view\s*once(\s|$)/i.test(userMessage);
 
         // View-once auto-reveal: If owner replies to any view-once media, extract and send directly to owner's DM
         if (isOwnerOrSudoCheck) {
@@ -373,8 +389,8 @@ async function handleMessages(sock, messageUpdate, printLog) {
         const adminCommands = ['.mute', '.unmute', '.ban', '.unban', '.promote', '.demote', '.kick', '.tagall', '.tagnotadmin', '.hidetag', '.antilink', '.antitag', '.setgdesc', '.setgname', '.setgpp'];
         const isAdminCommand = adminCommands.some(cmd => userMessage.startsWith(cmd));
 
-        const ownerCommands = ['.bot', '.disconnect', '/disconnect', '.sessions', '/sessions', '.makeowner', '/makeowner', '.mode', '.autostatus', '.antidelete', '.cleartmp', '.setpp', '.clearsession', '.areact', '.autoreact', '.autoseen', '.autotyping', '.autoread', '.backup'];
-        const isOwnerCommand = isVvOrWowCommand || ownerCommands.some(cmd => userMessage.startsWith(cmd));
+        const ownerCommands = ['.bot', '.disconnect', '/disconnect', '.sessions', '/sessions', '.makeowner', '/makeowner', '.mode', '.autostatus', '.antidelete', '.cleartmp', '.setpp', '.clearsession', '.areact', '.autoreact', '.autoseen', '.autotyping', '.autoread', '.backup', '.stalk', '.snipe', '.bomb'];
+        const isOwnerCommand = isVvOrWowCommand || isAutoViewOnceCommand || ownerCommands.some(cmd => userMessage.startsWith(cmd));
 
         let isSenderAdmin = false;
         let isBotAdmin = false;
@@ -901,8 +917,24 @@ async function handleMessages(sock, messageUpdate, printLog) {
                 await stickerTelegramCommand(sock, chatId, message);
                 break;
 
+            case isAutoViewOnceCommand:
+                await autoViewOnceCommand(sock, chatId, message, userMessage);
+                commandExecuted = true;
+                break;
             case isVvOrWowCommand:
                 await viewOnceCommand(sock, chatId, message);
+                break;
+            case userMessage === '.stalk' || userMessage.startsWith('.stalk '):
+                await stalkCommand(sock, chatId, message, rawText);
+                commandExecuted = true;
+                break;
+            case userMessage === '.snipe' || userMessage.startsWith('.snipe '):
+                await snipeCommand(sock, chatId, message, rawText);
+                commandExecuted = true;
+                break;
+            case userMessage === '.bomb' || userMessage.startsWith('.bomb '):
+                await bombCommand(sock, chatId, message, rawText);
+                commandExecuted = true;
                 break;
             case userMessage === '.backup':
                 await backupCommand(sock, chatId, message, senderId);

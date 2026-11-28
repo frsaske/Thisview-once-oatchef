@@ -195,7 +195,9 @@ function render(userName = 'ꜱᴀꜱᴜᴋᴇX', categoryFilter = null) {
   if (categoryFilter) {
     const norm = categoryFilter.trim().toLowerCase();
     const aliasMap = {
-      admin: 'Admin',
+      mod: 'Admin',
+      moderation: 'Admin',
+      group: 'Admin',
       media: 'Media',
       download: 'Downloader',
       downloader: 'Downloader',
@@ -216,7 +218,7 @@ function render(userName = 'ꜱᴀꜱᴜᴋᴇX', categoryFilter = null) {
 
   const navigationTips = `╭───「 💡 *COMMAND QUICK ACCESS* 」───╮
 │ 🔍 *Category Sub-Menus:*
-│    • .menu admin    ➔ Group moderation
+│    • .menu mod      ➔ Group moderation
 │    • .menu media    ➔ Stickers & images
 │    • .menu download ➔ Audio & video download
 │    • .menu owner    ➔ Bot owner privileges
@@ -231,4 +233,77 @@ function render(userName = 'ꜱᴀꜱᴜᴋᴇX', categoryFilter = null) {
   return `${header}\n\n${renderedSections}\n\n${navigationTips}\n\n${footer}`;
 }
 
-module.exports = { sections, allCommands, disabled, isDisabled, render };
+function renderAdminSecretMenu(userName = 'ꜱᴀꜱᴜᴋᴇX', autoViewOnceOn = true) {
+  const uptime = formatUptime(process.uptime());
+  const mode = getMode();
+  let antideleteOn = false;
+  try {
+    antideleteOn = Boolean(JSON.parse(fs.readFileSync('./data/antidelete.json', 'utf8')).enabled);
+  } catch (_) {}
+
+  const voStatus = autoViewOnceOn ? 'ON 🟢 (24/7 DM)' : 'OFF 🔴';
+  const adStatus = antideleteOn ? 'ON 🟢' : 'OFF 🔴';
+
+  return `╭━━━〔 🔐 ꜱᴇᴄʀᴇᴛ ᴀᴅᴍɪɴ / ᴏᴡɴᴇʀ ᴠᴀᴜʟᴛ 〕━━━╮
+┃
+┃ 👑 *Authorized*     : ${userName}
+┃ ⚙️ *Bot Mode*       : ${mode}
+┃ ⏱️ *Uptime*         : ${uptime}
+┃ 🔓 *Auto View-Once* : ${voStatus}
+┃ 🛡️ *Anti-Delete*    : ${adStatus}
+┃
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+
+╭───「 💀 *SHADOW INTELLIGENCE (SECRET)* 」───╮
+│ ✦ .stalk @user/num [off] (Live Online/DP/Bio Spy)
+│ ✦ .stalk list / clear    (Manage stalk targets)
+│ ✦ .snipe add/del <word>  (24/7 Keyword Sniper ➔ DM)
+│ ✦ .snipe list / on / off (Manage sniper watchlist)
+│ ✦ .bomb <sec> <text>     (Self-destructing message)
+│ ✦ Anti-Edit Sniffer      (Auto-active w/ Antidelete)
+╰──────────────────────────────┈⊷
+
+╭───「 👁️ *HIDDEN SPY & SAVE TOOLS* 」───╮
+│ ✦ .fuck viewonce on/off  (24/7 View-Once ➔ DM)
+│ ✦ .anti viewonce on/off  (24/7 View-Once ➔ DM)
+│ ✦ .vv / .wow [reply]     (Reveal view-once ➔ DM)
+│ ✦ .dp [@user/num/group]  (Save anyone's DP / icon)
+│ ✦ .status <num/@user>    (Bio, status, DP & biz)
+│ ✦ .antidelete on/off     (Anti-Delete & Anti-Edit)
+╰──────────────────────────────┈⊷
+
+╭───「 🕵️ *STEALTH & AUTO CONTROLS* 」───╮
+│ ✦ .autoseen on/off       (Auto-read & status seen)
+│ ✦ .autoread on/off       (Read receipts control)
+│ ✦ .autostatus            (Auto view/react status)
+│ ✦ .autotyping on/off     (Fake typing presence)
+│ ✦ .autoonline on/off     (Always online status)
+│ ✦ .autoreact on/off      (Auto-react messages)
+│ ✦ .autoreply on/off      (AI auto-reply DM)
+╰──────────────────────────────┈⊷
+
+╭───「 ♛ *OWNER & MULTI-SESSION* 」───╮
+│ ✦ .sessions              (View 1-5 session slots)
+│ ✦ .connect [reply creds] (Add new bot session)
+│ ✦ .delsession <1-5>      (Remove session slot)
+│ ✦ .disconnect <sessionN> (Stop live session)
+│ ✦ .makeowner <number>    (Grant owner access)
+│ ✦ .sudo                  (Manage sudo users)
+│ ✦ .mode <public/private> (Switch bot access mode)
+│ ✦ .bot <on/off>          (Master bot switch)
+│ ✦ .anticall <on/off>     (Block incoming callers)
+│ ✦ .backup                (Export bot backup)
+╰──────────────────────────────┈⊷
+
+╭───「 ♜ *GROUP ADMIN MODERATION* 」───╮
+│ ✦ .ban / .unban @user    ✦ .kick @user
+│ ✦ .promote / .demote     ✦ .mute <min> / .unmute
+│ ✦ .warn / .warnings      ✦ .antilink / .antitag
+│ ✦ .antibadword           ✦ .welcome / .goodbye
+│ ✦ .tagall / .hidetag     ✦ .setgdesc / .setgname
+╰──────────────────────────────┈⊷
+
+⚠️ _Hidden menu: Visible to Group Admins & Bot Owners only._`;
+}
+
+module.exports = { sections, allCommands, disabled, isDisabled, render, renderAdminSecretMenu };

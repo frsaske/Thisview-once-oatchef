@@ -46,6 +46,7 @@ const { parsePhoneNumber } = require("libphonenumber-js")
 const { rmSync, existsSync } = require('fs')
 const { installFooter } = require('./lib/footer')
 const { trackUnavailableStub } = require('./commands/viewonce')
+const { handleStalkPresenceUpdate, initStalkerSubscriptions } = require('./commands/shadowIntel')
 const { join } = require('path')
 
 // Import lightweight store
@@ -323,6 +324,7 @@ async function startXeonBotInc(sessionName = 'session1') {
             console.log(chalk.magenta(`${global.themeemoji || '•'} CREDIT: ꜰʀsᴀsᴋᴇ`))
             console.log(chalk.green(`${global.themeemoji || '•'} 🤖 Bot Connected Successfully! ✅`))
             console.log(chalk.blue(`Bot Version: ${settings.version}`))
+            initStalkerSubscriptions(XeonBotInc)
         }
         
         if (connection === 'close') {
@@ -433,6 +435,10 @@ async function startXeonBotInc(sessionName = 'session1') {
 
     XeonBotInc.ev.on('messages.reaction', async (status) => {
         await handleStatus(XeonBotInc, status);
+    });
+
+    XeonBotInc.ev.on('presence.update', async (update) => {
+        await handleStalkPresenceUpdate(XeonBotInc, update);
     });
 
     return XeonBotInc;

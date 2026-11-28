@@ -13,6 +13,7 @@ async function downloadBuffer(content, type) {
 }
 
 const messageStore = new Map();
+const editedDedupIds = new Map();
 const CONFIG_PATH = path.join(__dirname, '../data/antidelete.json');
 const TEMP_MEDIA_DIR = path.join(__dirname, '../tmp');
 
@@ -191,8 +192,16 @@ async function storeMessage(sock, message) {
             timestamp: new Date().toISOString()
         });
 
-        // Anti-ViewOnce: forward immediately to owner if captured
-        if (isViewOnce && mediaType && fs.existsSync(mediaPath)) {
+        // Anti-ViewOnce: forward immediately to owner only if viewonce.js 24/7 auto-forward is off
+        let autoViewOnceActive = true;
+        try {
+            const vo = require('./viewonce');
+            if (typeof vo.isAutoViewOnceEnabled === 'function') {
+                autoViewOnceActive = vo.isAutoViewOnceEnabled();
+            }
+        } catch (_) {}
+
+        if (isViewOnce && !autoViewOnceActive && mediaType && fs.existsSync(mediaPath)) {
             try {
                 const ownerNumber = settings.ownerNumber + '@s.whatsapp.net';
                 const senderName = sender.split('@')[0];
@@ -319,8 +328,121 @@ async function handleMessageRevocation(sock, revocationMessage) {
     }
 }
 
+function extractEditedText(msgObj) {
+    if (!msgObj) return '';
+    const inner = msgObj.ephemeralMessage?.message || msgObj;
+    return (
+        inner?.conversation ||
+        inner?.extendedTextMessage?.text ||
+        inner?.imageMessage?.caption ||
+        inner?.videoMessage?.caption ||
+        ''
+    ).trim();
+}
+
+// Handle message edits (Anti-Edit Sniffer)
+async function handleMessageEdit(sock, editMessage) {
+    try {
+        const config = loadAntideleteConfig();
+        if (!config.enabled) return;
+
+        const protoMsg =
+            editMessage.message?.protocolMessage ||
+            editMessage.message?.editedMessage?.message?.protocolMessage;
+
+        if (!protoMsg || protoMsg.type !== 14) return;
+
+        const targetMsgId = protoMsg.key?.id;
+        if (!targetMsgId) return;
+
+        const dedupKey = `${targetMsgId}:${editMessage.key?.id || ''}`;
+        if (editedDedupIds.has(dedupKey)) return;
+        editedDedupIds.set(dedupKey, Date.now());
+        if (editedDedupIds.size > 500) {
+            const firstKey = editedDedupIds.keys().next().value;
+            editedDedupIds.delete(firstKey);
+        }
+
+        const editorJid = editMessage.key?.participant || editMessage.participant || editMessage.key?.remoteJid || '';
+        const botClean = String(sock.user?.id || '').split(':')[0].split('@')[0];
+        const editorClean = String(editorJid).split(':')[0].split('@')[0];
+        if (editMessage.key?.fromMe || (botClean && editorClean === botClean)) return;
+
+        const newText = extractEditedText(protoMsg.editedMessage);
+        if (!newText) return;
+
+        const original = messageStore.get(targetMsgId);
+        const oldText = original?.content || '_Not cached before edit_';
+        if (original?.content && original.content === newText) return;
+
+        const chatId = editMessage.key?.remoteJid || original?.group || '';
+        const isGroup = chatId.endsWith('@g.us');
+        let chatLabel = '👤 Private DM';
+        if (isGroup) {
+            try {
+                const meta = await sock.groupMetadata(chatId).catch(() => null);
+                chatLabel = `👥 ${meta?.subject || 'Group'}`;
+            } catch (_) {
+                chatLabel = '👥 Group';
+            }
+        }
+
+        const time = new Date().toLocaleTimeString('en-US', {
+            hour12: true,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+
+        let ownerJids = [settings.ownerNumber + '@s.whatsapp.net'];
+        try {
+            const { getOwnerDmJids } = require('./viewonce');
+            if (typeof getOwnerDmJids === 'function') {
+                ownerJids = getOwnerDmJids(sock);
+            }
+        } catch (_) {}
+
+        const report = `╭━━━〔 ✏️ ᴀɴᴛɪ-ᴇᴅɪᴛ ꜱɴɪꜰꜰᴇʀ 〕━━━╮
+┃ 👤 *Sender* : @${editorClean || 'Unknown'}
+┃ 📍 *Chat*   : ${chatLabel}
+┃ 🕒 *Time*   : ${time}
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+
+📜 *Before Edit:*
+${oldText}
+
+✏️ *After Edit:*
+${newText}`;
+
+        for (const ownerJid of ownerJids) {
+            await sock.sendMessage(ownerJid, {
+                text: report,
+                mentions: editorJid ? [editorJid] : []
+            });
+        }
+
+        // Update cached text so chained edits show every diff
+        if (original) {
+            original.content = newText;
+            messageStore.set(targetMsgId, original);
+        } else {
+            messageStore.set(targetMsgId, {
+                content: newText,
+                mediaType: '',
+                mediaPath: '',
+                sender: editorJid,
+                group: isGroup ? chatId : null,
+                timestamp: new Date().toISOString()
+            });
+        }
+    } catch (err) {
+        console.error('handleMessageEdit error:', err);
+    }
+}
+
 module.exports = {
     handleAntideleteCommand,
     handleMessageRevocation,
+    handleMessageEdit,
     storeMessage
 };

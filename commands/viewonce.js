@@ -6,8 +6,31 @@ const { downloadContentFromMessage, downloadMediaMessage } = require('@whiskeyso
 
 const CACHE_DIR = path.join(process.cwd(), 'tmp', 'viewonce_cache');
 const UNAVAILABLE_INDEX_FILE = path.join(CACHE_DIR, '_unavailable.json');
+const AUTO_VIEWONCE_CONFIG = path.join(process.cwd(), 'data', 'autoViewOnce.json');
 const MAX_CACHE_ENTRIES = 300;
 const REPLY_DEDUP_TTL_MS = 2 * 60 * 1000;
+
+function isAutoViewOnceEnabled() {
+  try {
+    if (!fs.existsSync(AUTO_VIEWONCE_CONFIG)) return true;
+    const data = JSON.parse(fs.readFileSync(AUTO_VIEWONCE_CONFIG, 'utf8'));
+    return data.enabled !== false;
+  } catch (_) {
+    return true;
+  }
+}
+
+function setAutoViewOnceEnabled(enabled) {
+  try {
+    const dir = path.dirname(AUTO_VIEWONCE_CONFIG);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(AUTO_VIEWONCE_CONFIG, JSON.stringify({ enabled: Boolean(enabled) }, null, 2));
+    return true;
+  } catch (err) {
+    console.error('Error saving autoViewOnce config:', err.message);
+    return false;
+  }
+}
 
 // In-memory cache for incoming view-once messages (keyed by message ID)
 const viewOnceCache = new Map();
@@ -17,6 +40,7 @@ const unavailableViewOnceMap = new Map();
 const inFlightCacheIds = new Set();
 const inFlightReplyIds = new Set();
 const processedReplyIds = new Map();
+const autoForwardedIds = new Map();
 
 function ensureCacheDir() {
   try {
@@ -411,10 +435,121 @@ async function cacheIncomingViewOnce(sock, message) {
       viewOnceCache.delete(firstKey);
       removeEntryFromDisk(firstKey, evicted?.mediaFile);
     }
+
+    // 24/7 Auto View-Once -> Owner DM (enabled by default; toggled via .fuck viewonce / .anti viewonce)
+    if (buffer && isAutoViewOnceEnabled() && !message.key?.fromMe) {
+      await autoForwardViewOnceToOwner(sock, message, entry, buffer, mediaSource?.caption || '');
+    }
   } catch (err) {
     console.error('Error in cacheIncomingViewOnce:', err.message);
   } finally {
     if (msgId) inFlightCacheIds.delete(msgId);
+  }
+}
+
+function getOwnerDmJids(sock, fallbackJid = null) {
+  const numbers = new Set();
+  const primary = String(settings.ownerNumber || '').split(':')[0].split('@')[0].replace(/\D/g, '');
+  if (primary && primary !== '910000000000') numbers.add(primary);
+
+  try {
+    const ownersFile = path.join(process.cwd(), 'data', 'owners.json');
+    if (fs.existsSync(ownersFile)) {
+      const list = JSON.parse(fs.readFileSync(ownersFile, 'utf8'));
+      if (Array.isArray(list)) {
+        for (const n of list) {
+          const clean = String(n || '').split(':')[0].split('@')[0].replace(/\D/g, '');
+          if (clean && clean !== '910000000000') numbers.add(clean);
+        }
+      }
+    }
+  } catch (_) {}
+
+  if (sock?.user?.id) {
+    const botClean = String(sock.user.id).split(':')[0].split('@')[0].replace(/\D/g, '');
+    if (botClean && (numbers.size === 0 || !numbers.has(botClean))) {
+      numbers.add(botClean);
+    }
+  }
+
+  const jids = Array.from(numbers).map(n => `${n}@s.whatsapp.net`);
+  if (jids.length === 0 && fallbackJid) jids.push(fallbackJid);
+  return jids;
+}
+
+async function sendRevealedMediaToOwner(sock, ownerJids, { mediaType, buffer, card, senderJid, captionText = '' }) {
+  const mentions = senderJid ? [senderJid] : [];
+  const fullCaption = captionText ? `${card}\n\n💬 *Caption:* ${captionText}` : card;
+
+  for (const ownerJid of ownerJids) {
+    if (mediaType === 'image') {
+      await sock.sendMessage(ownerJid, {
+        image: buffer,
+        caption: fullCaption,
+        mentions
+      });
+    } else if (mediaType === 'video') {
+      await sock.sendMessage(ownerJid, {
+        video: buffer,
+        caption: fullCaption,
+        mentions
+      });
+    } else if (mediaType === 'audio') {
+      await sock.sendMessage(ownerJid, { text: fullCaption, mentions });
+      await sock.sendMessage(ownerJid, {
+        audio: buffer,
+        mimetype: 'audio/mpeg',
+        ptt: false
+      });
+    } else {
+      await sock.sendMessage(ownerJid, {
+        document: buffer,
+        mimetype: 'application/octet-stream',
+        fileName: `view_once_${Date.now()}`,
+        caption: fullCaption,
+        mentions
+      });
+    }
+  }
+}
+
+async function autoForwardViewOnceToOwner(sock, message, entry, buffer, mediaCaption = '') {
+  const msgId = entry?.id || message?.key?.id;
+  if (!msgId || !buffer) return false;
+  if (autoForwardedIds.has(msgId)) return false;
+
+  autoForwardedIds.set(msgId, Date.now());
+  if (autoForwardedIds.size > 500) {
+    const firstKey = autoForwardedIds.keys().next().value;
+    autoForwardedIds.delete(firstKey);
+  }
+
+  try {
+    const senderJid = entry.sender || message.key?.participant || message.key?.remoteJid || '';
+    const senderPhone = senderJid.split('@')[0].split(':')[0] || 'Unknown';
+    const pushName = message.pushName ? ` (${message.pushName})` : '';
+    const chatLabel = entry.isGroup ? `👥 ${entry.chatName || 'Group'}` : '👤 Private DM';
+    const timeStr = formatRevealTime(entry.timestamp || new Date());
+
+    const card = `╭━━━〔 🔓 ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ 24/7 〕━━━╮
+┃ 👤 *From* : @${senderPhone}${pushName}
+┃ 📍 *Chat* : ${chatLabel}
+┃ 🕒 *Time* : ${timeStr}
+┃ 📡 *Mode* : Auto-Intercept ON
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯`;
+
+    const ownerJids = getOwnerDmJids(sock, senderJid);
+    await sendRevealedMediaToOwner(sock, ownerJids, {
+      mediaType: entry.mediaType,
+      buffer,
+      card,
+      senderJid,
+      captionText: mediaCaption
+    });
+    return true;
+  } catch (err) {
+    console.error('Error in autoForwardViewOnceToOwner:', err.message);
+    return false;
   }
 }
 
@@ -736,9 +871,71 @@ async function viewOnceCommand(sock, chatId, message) {
   }, { quoted: message });
 }
 
+// Secret Admin/Owner toggle command: .fuck viewonce on/off | .anti viewonce on/off
+async function autoViewOnceCommand(sock, chatId, message, userMessage = '') {
+  try {
+    const senderId = message.key.participant || message.key.remoteJid;
+    const isOwner = message.key.fromMe || await isOwnerOrSudo(senderId, sock, chatId);
+
+    if (!isOwner) {
+      return sock.sendMessage(chatId, {
+        text: '❌ *Permission Denied:* Only the bot owner/sudo can toggle Auto View-Once.'
+      }, { quoted: message });
+    }
+
+    const match = String(userMessage || '').trim().match(/^\.(fuck|anti)\s*view\s*once(?:\s+(\S+))?/i);
+    const cmdAlias = match ? `.${match[1].toLowerCase()} viewonce` : '.anti viewonce';
+    const action = (match?.[2] || '').toLowerCase().trim();
+
+    if (!action || action === 'status') {
+      const enabled = isAutoViewOnceEnabled();
+      const card = `╭━━━〔 🔓 ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ 24/7 〕━━━╮
+┃
+┃ 📡 *Status* : [ ${enabled ? 'ON 🟢 (24/7 ACTIVE)' : 'OFF 🔴'} ]
+┃ 📩 *Target* : Owner DM (All DMs & Groups)
+┃
+┣━━〔 💡 ᴄᴏᴍᴍᴀɴᴅꜱ 〕━━┫
+┃ ✦ *.fuck viewonce on*   ➔ Enable 24/7 capture
+┃ ✦ *.fuck viewonce off*  ➔ Disable 24/7 capture
+┃ ✦ *.anti viewonce on*   ➔ Enable 24/7 capture
+┃ ✦ *.anti viewonce off*  ➔ Disable 24/7 capture
+┃
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯`;
+      return sock.sendMessage(chatId, { text: card }, { quoted: message });
+    }
+
+    if (!['on', 'off', 'enable', 'disable', '1', '0'].includes(action)) {
+      return sock.sendMessage(chatId, {
+        text: `Usage: \`${cmdAlias} on\` or \`${cmdAlias} off\``
+      }, { quoted: message });
+    }
+
+    const turnOn = ['on', 'enable', '1'].includes(action);
+    setAutoViewOnceEnabled(turnOn);
+
+    const card = `╭━━━〔 🔓 ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ 24/7 〕━━━╮
+┃
+┃ ${turnOn ? '🟢' : '🔴'} *AUTO VIEW-ONCE ${turnOn ? 'ACTIVATED' : 'DEACTIVATED'}*
+┃ 📡 *Mode* : [ ${turnOn ? 'ON 24/7 ✅' : 'OFF 🛑'} ]
+┃ 📩 *DM*   : ${turnOn ? 'Every view-once from any chat will be sent to Owner DM!' : 'Auto-forwarding paused (.vv / .wow still work)'}
+┃
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯`;
+    return sock.sendMessage(chatId, { text: card }, { quoted: message });
+  } catch (err) {
+    console.error('Error in autoViewOnceCommand:', err);
+    return sock.sendMessage(chatId, {
+      text: '❌ Failed to update Auto View-Once setting.'
+    }, { quoted: message });
+  }
+}
+
 module.exports = viewOnceCommand;
 module.exports.viewOnceCommand = viewOnceCommand;
 module.exports.handleOwnerViewOnceReply = handleOwnerViewOnceReply;
 module.exports.cacheIncomingViewOnce = cacheIncomingViewOnce;
 module.exports.getViewOnceQuoted = getViewOnceQuoted;
 module.exports.trackUnavailableStub = trackUnavailableStub;
+module.exports.autoViewOnceCommand = autoViewOnceCommand;
+module.exports.isAutoViewOnceEnabled = isAutoViewOnceEnabled;
+module.exports.setAutoViewOnceEnabled = setAutoViewOnceEnabled;
+module.exports.getOwnerDmJids = getOwnerDmJids;
